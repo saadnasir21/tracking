@@ -224,17 +224,42 @@ function extractTrackingId_(value) {
     return '';
   }
 
-  const urlMatch = text.match(/[?&]ID=(\w+)/i);
-  if (urlMatch) {
-    return urlMatch[1];
+  const searchText = text;
+  for (let i = 0; i < SHIPNOC_CONFIG.trackingParamNames.length; i++) {
+    const paramName = SHIPNOC_CONFIG.trackingParamNames[i];
+    const regex = new RegExp('[?&]' + escapeRegex_(paramName) + '=([^&#]+)', 'i');
+    const match = searchText.match(regex);
+    if (match && match[1]) {
+      return safeDecodeURIComponent_(match[1]).trim();
+    }
   }
 
-  const digitsMatch = text.match(/\d{6,}/);
-  if (digitsMatch) {
-    return digitsMatch[0];
+  const genericIdMatch = searchText.match(/[?&]id=([^&#]+)/i);
+  if (genericIdMatch && genericIdMatch[1]) {
+    return safeDecodeURIComponent_(genericIdMatch[1]).trim();
+  }
+
+  const alphanumericMatches = searchText.match(/\b[0-9A-Za-z]{6,}\b/g);
+  if (alphanumericMatches) {
+    const candidate = alphanumericMatches.find((value) => /\d/.test(value));
+    if (candidate) {
+      return candidate;
+    }
   }
 
   return '';
+}
+
+function escapeRegex_(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function safeDecodeURIComponent_(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch (error) {
+    return value;
+  }
 }
 
 function parseTrackingPayload_(payload) {
