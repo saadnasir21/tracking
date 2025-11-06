@@ -4,17 +4,28 @@ const SHIPNOC_CONFIG = {
     password: 'SHIPNOC_PASSWORD'
   },
   signatureSuffix: 'noc@#',
-  apiCandidates: [
-    'https://shipnoc.com/TrackingAPI/api/Tracking/GetTrackingDetails',
-    'https://shipnoc.com/TrackingAPI/api/Tracking/GetStatusHistory',
-    'https://shipnoc.com/TrackingAPI/api/Tracking/GetTrackingStatus',
-    'https://api.shipnoc.com/TrackingAPI/api/Tracking/GetTrackingDetails'
+  endpoints: [
+    { url: 'https://shipnoc.com/TrackingAPI/api/Tracking/GetTrackingDetails', methods: ['get', 'post'] },
+    { url: 'https://shipnoc.com/TrackingAPI/api/Tracking/GetStatusHistory', methods: ['get', 'post'] },
+    { url: 'https://shipnoc.com/TrackingAPI/api/Tracking/GetTrackingStatus', methods: ['get', 'post'] },
+    { url: 'https://api.shipnoc.com/TrackingAPI/api/Tracking/GetTrackingDetails', methods: ['get', 'post'] }
   ],
-  requestOptions: {
-    method: 'get',
+  trackingParamNames: [
+    'trackingNo',
+    'trackingNumber',
+    'TrackingNo',
+    'TrackingNumber',
+    'trackingID',
+    'TrackingID'
+  ],
+  signatureParamNames: ['signature', 'Signature'],
+  baseRequestOptions: {
     followRedirects: true,
     muteHttpExceptions: true,
-    contentType: 'application/json; charset=utf-8'
+    contentType: 'application/json; charset=utf-8',
+    headers: {
+      Accept: 'application/json, text/plain, */*'
+    }
   }
 };
 
@@ -81,26 +92,35 @@ function buildShipnocSignature_() {
 function fetchLatestStatus_(trackingId, signature) {
   let lastError;
 
-  for (let i = 0; i < SHIPNOC_CONFIG.apiCandidates.length; i++) {
-    const endpoint = SHIPNOC_CONFIG.apiCandidates[i];
+  for (let i = 0; i < SHIPNOC_CONFIG.endpoints.length; i++) {
+    const endpoint = SHIPNOC_CONFIG.endpoints[i];
+    const attempts = buildShipnocRequestAttempts_(endpoint, trackingId, signature);
 
-    const response = callShipnocEndpoint_(endpoint, trackingId, signature);
-    if (!response) {
-      continue;
-    }
-
-    const { code, text } = response;
-    if (code === 200 && text) {
-      const parsed = parseTrackingPayload_(text);
-      if (parsed) {
-        return parsed;
+    for (let j = 0; j < attempts.length; j++) {
+      const attempt = attempts[j];
+      const response = executeShipnocRequest_(attempt);
+      if (!response) {
+        continue;
       }
 
-      lastError = new Error('Unable to parse response from ' + endpoint);
-      continue;
-    }
+      const { code, text } = response;
+      if (code === 200 && text) {
+        const parsed = parseTrackingPayload_(text);
+        if (parsed) {
+          return parsed;
+        }
 
-    lastError = new Error('HTTP ' + code + ' calling ' + endpoint);
+        lastError = new Error('Unable to parse response from ' + endpoint.url);
+        continue;
+      }
+
+      if (code === 404) {
+        lastError = new Error('ShipNoc returned 404 for ' + endpoint.url + '. Confirm the tracking number and signature.');
+        continue;
+      }
+
+      lastError = new Error('HTTP ' + code + ' calling ' + endpoint.url);
+    }
   }
 
   if (lastError) {
@@ -110,35 +130,88 @@ function fetchLatestStatus_(trackingId, signature) {
   throw new Error('Unable to reach ShipNoc tracking endpoints.');
 }
 
-function callShipnocEndpoint_(endpoint, trackingId, signature) {
-  if (!endpoint) {
-    return null;
+function buildShipnocRequestAttempts_(endpoint, trackingId, signature) {
+  const attempts = [];
+  if (!endpoint || !endpoint.url) {
+    return attempts;
   }
 
-  const params = Object.assign({}, SHIPNOC_CONFIG.requestOptions);
-  const queryStrings = [
-    'trackingNumber=' + encodeURIComponent(trackingId),
-    'trackingNo=' + encodeURIComponent(trackingId),
-    'trackingnumber=' + encodeURIComponent(trackingId)
-  ];
+  const methods = endpoint.methods && endpoint.methods.length ? endpoint.methods : ['get'];
+  const trackingNames = SHIPNOC_CONFIG.trackingParamNames;
+  const signatureNames = SHIPNOC_CONFIG.signatureParamNames;
+  const seen = new Set();
 
-  const signatureParam = 'signature=' + encodeURIComponent(signature);
-  const urlsToTry = queryStrings.map((qs) => endpoint + '?' + qs + '&' + signatureParam);
-
-  for (let i = 0; i < urlsToTry.length; i++) {
-    const url = urlsToTry[i];
-    try {
-      const response = UrlFetchApp.fetch(url, params);
-      return {
-        code: response.getResponseCode(),
-        text: response.getContentText()
-      };
-    } catch (error) {
-      Logger.log('Error calling %s: %s', url, error);
+  if (methods.indexOf('get') !== -1) {
+    for (let i = 0; i < trackingNames.length; i++) {
+      for (let j = 0; j < signatureNames.length; j++) {
+        const trackingParam = trackingNames[i];
+        const signatureParam = signatureNames[j];
+        const url = endpoint.url +
+          '?' + encodeURIComponent(trackingParam) + '=' + encodeURIComponent(trackingId) +
+          '&' + encodeURIComponent(signatureParam) + '=' + encodeURIComponent(signature);
+        const key = 'GET:' + url;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        attempts.push({
+          method: 'get',
+          url: url
+        });
+      }
     }
   }
 
-  return null;
+  if (methods.indexOf('post') !== -1) {
+    for (let i = 0; i < trackingNames.length; i++) {
+      for (let j = 0; j < signatureNames.length; j++) {
+        const trackingParam = trackingNames[i];
+        const signatureParam = signatureNames[j];
+        const payload = {};
+        payload[trackingParam] = trackingId;
+        payload[signatureParam] = signature;
+        const body = JSON.stringify(payload);
+        const key = 'POST:' + endpoint.url + ':' + body;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        attempts.push({
+          method: 'post',
+          url: endpoint.url,
+          body: body
+        });
+      }
+    }
+  }
+
+  return attempts;
+}
+
+function executeShipnocRequest_(attempt) {
+  if (!attempt) {
+    return null;
+  }
+
+  const options = Object.assign({}, SHIPNOC_CONFIG.baseRequestOptions);
+  options.method = attempt.method || 'get';
+
+  if (options.method.toLowerCase() === 'post') {
+    options.payload = attempt.body || '';
+  } else {
+    delete options.payload;
+  }
+
+  try {
+    const response = UrlFetchApp.fetch(attempt.url, options);
+    return {
+      code: response.getResponseCode(),
+      text: response.getContentText()
+    };
+  } catch (error) {
+    Logger.log('Error calling %s %s: %s', (attempt.method || 'GET').toUpperCase(), attempt.url, error);
+    return null;
+  }
 }
 
 function extractTrackingId_(value) {
